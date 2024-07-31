@@ -105,6 +105,10 @@ def main():
                         help='Power on target by JLink',
                         required=False,
                         default=False)
+    parser.add_argument('--log-file', type=str, help='File to log terminal output', required=False)
+    parser.add_argument('--no-input', action='store_true', help='Disable user input and just output RTT logs')
+
+
 
     args = parser.parse_args()
     args.speed = 'auto' if args.speed == 0 else args.speed
@@ -114,33 +118,55 @@ def main():
     if not jlink_broken:
         return
 
-    kill_evt = Event()
-    input: Thread = Thread(target=reading_input, args=([kill_evt]), daemon=True)
-    input.start()
+    log_file = None
+    if args.log_file:
+        # Open the file in write mode to overwrite it first
+        log_file = open(args.log_file, 'w')
+        log_file.close()
+        # Reopen the file in append mode
+        log_file = open(args.log_file, 'a')
 
-    while not kill_evt.wait(0.01):
-        # Try to reconnect to JLink
-        if jlink_broken == JLinkIsBroken:
-            jlink_broken = reconnect(jlink)
-        # Read data from console input queue
-        if not cmd_queue.empty():
-            cmd = cmd_queue.get_nowait()
-            if cmd == ConsoleCmd.RESET.value:
-                jlink_broken = reset_target(jlink)
-            elif cmd == ConsoleCmd.RECONNECT.value:
+    if not args.no_input:
+        kill_evt = Event()
+        input_thread = Thread(target=reading_input, args=([kill_evt]), daemon=True)
+        input_thread.start()
+    else:
+        kill_evt = Event()
+
+    try:
+        while not kill_evt.wait(0.01):
+            # Try to reconnect to JLink
+            if jlink_broken == JLinkIsBroken:
+                jlink_broken = reconnect(jlink)
+            # Read data from console input queue if user input is not disabled
+            if not args.no_input and not cmd_queue.empty():
+                cmd = cmd_queue.get_nowait()
+                if cmd == ConsoleCmd.RESET.value:
+                    jlink_broken = reset_target(jlink)
+                elif cmd == ConsoleCmd.RECONNECT.value:
+                    jlink_broken = JLinkIsBroken
+                elif cmd in {ConsoleCmd.POWER_ON.value, ConsoleCmd.POWER_OFF.value}:
+                    power_on(jlink, True if "on" in cmd else False)
+                elif cmd == ConsoleCmd.CLEAR.value:
+                    os.system('cls' if os.name=='nt' else 'clear')
+                else:
+                    jlink_broken = write_cmd(jlink, cmd)
+            # Read data from JLink
+            if rx_data := read_data(jlink):
+                print(rx_data, end="")
+                if log_file:
+                    log_file.write(rx_data)
+                    log_file.flush()
+            elif rx_data == JLinkIsBroken:
                 jlink_broken = JLinkIsBroken
-            elif cmd in {ConsoleCmd.POWER_ON.value, ConsoleCmd.POWER_OFF.value}:
-                power_on(jlink, True if "on" in cmd else False)
-            elif cmd == ConsoleCmd.CLEAR.value:
-                os.system('cls' if os.name=='nt' else 'clear')
-            else:
-                jlink_broken = write_cmd(jlink, cmd)
-        # Read data from JLink
-        if rx_data := read_data(jlink):
-            print(rx_data, end="")
-        elif rx_data == JLinkIsBroken:
-            jlink_broken = JLinkIsBroken
-
+    finally:
+        if log_file:
+            log_file.close()
 
 if __name__ == "__main__":
-    main()
+    log_file = None
+    try:
+        main()
+    finally:
+        if log_file:
+            log_file.close()
